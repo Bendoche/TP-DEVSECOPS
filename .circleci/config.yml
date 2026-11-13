@@ -232,7 +232,7 @@ jobs:
             curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /tmp
             echo "Scanning image $REPOSITORY:$TAG with Trivy..."
             /tmp/trivy image --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-report.txt $REPOSITORY:$TAG
-            cat trivy-report.txtf
+            cat trivy-report.txt
       - store_artifacts:
           path: trivy-report.txt
           destination: trivy-security-report
