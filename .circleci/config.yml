@@ -273,7 +273,7 @@ jobs:
       - run:
           name: Deploy image to production EC2 (with health check + rollback)
           command: |
-            REPOSITORY=$(echo "ghcr.io/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
+            REPOSITORY=$(echo "ghcr.io/$GHCR_USERNAME/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
             IMAGE="$REPOSITORY:sha-$(echo "$CIRCLE_SHA1" | cut -c1-12)"
             ssh -o StrictHostKeyChecking=yes "$PROD_USER@$AWS_HOST" \
               "bash -s -- '$IMAGE' php-devops-tp-prod '${PROD_APP_PORT:-80}' prod" < scripts/deploy.sh
