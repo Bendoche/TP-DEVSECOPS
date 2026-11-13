@@ -86,7 +86,7 @@ jobs:
       - *attach_workspace
       - run:
           name: Install PHPMD
-          command: composer global require --no-interaction phpmd/phpmd
+          command: composer global require --no-interaction "phpmd/phpmd:^2.15"
       - run:
           name: Run PHPMD (cleancode, codesize, design, naming, unusedcode)
           command: |
