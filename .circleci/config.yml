@@ -216,7 +216,14 @@ jobs:
               .
 
             # Scan de vulnerabilites AVANT publication : HIGH/CRITICAL corrigeables => echec
-            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin "${TRIVY_VERSION:-v0.58.0}"
+            TV="${TRIVY_VERSION:-0.58.0}"   # sans le "v"
+            curl -fsSL -o /tmp/trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TV}/trivy_${TV}_Linux-64bit.tar.gz"
+            curl -fsSL -o /tmp/trivy_checksums.txt "https://github.com/aquasecurity/trivy/releases/download/v${TV}/trivy_${TV}_checksums.txt"
+            EXPECTED=$(grep " trivy_${TV}_Linux-64bit.tar.gz$" /tmp/trivy_checksums.txt | cut -d' ' -f1)
+            echo "$EXPECTED  /tmp/trivy.tgz" | sha256sum -c -
+            tar -xzf /tmp/trivy.tgz -C /tmp trivy
+            sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+            trivy --version
             mkdir -p reports
             trivy image --format json --output reports/trivy-image.json "$REPOSITORY:$SHA_TAG"
             trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$REPOSITORY:$SHA_TAG"
