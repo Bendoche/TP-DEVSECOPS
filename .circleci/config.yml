@@ -253,7 +253,7 @@ jobs:
       - run:
           name: Deploy image to staging EC2
           command: |
-            REPOSITORY=$(echo "ghcr.io/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
+            REPOSITORY=$(echo "ghcr.io/$GHCR_USERNAME/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
             IMAGE="$REPOSITORY:sha-$(echo "$CIRCLE_SHA1" | cut -c1-12)"
             ssh -o StrictHostKeyChecking=yes "$STAGING_SSH_USER@$STAGING_SSH_HOST" \
               "bash -s -- '$IMAGE' php-devops-tp-staging '${STAGING_APP_PORT:-8080}' staging" < scripts/deploy.sh
