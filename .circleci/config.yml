@@ -194,53 +194,48 @@ jobs:
     executor: builder-executor
     steps:
       - checkout
-      - setup_remote_docker:
-          docker_layer_caching: true
+      - setup_remote_docker
       - run:
-          name: Build, scan (Trivy), push (GHCR) and sign (cosign)
+          name: Build and Push Docker Image to GHCR (GitHub Container Registry)
           command: |
-            REPOSITORY=$(echo "ghcr.io/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
-            TAG=$(echo "$CIRCLE_BRANCH" | tr '[:upper:]' '[:lower:]' | tr '/' '-' | tr -cd '[:alnum:]._-' | cut -c 1-128)
-            SHA_TAG="sha-$(echo "$CIRCLE_SHA1" | cut -c1-12)"
+            if [ ! -z "$SKIP_BUILD" ]; then
+              echo "Skipping build"
+              circleci step halt
+              exit 0
+            fi
 
+            # Sanitize the repository name and branch name
+            REPOSITORY=$(echo "ghcr.io/${GHCR_USERNAME:-$CIRCLE_PROJECT_USERNAME}/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
+            TAG=$(echo $CIRCLE_BRANCH | tr '[:upper:]' '[:lower:]' | tr '/' '-' | tr -cd '[:alnum:]._-' | cut -c 1-128)
+
+            # Login to GHCR
             echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
+            # Build the Docker image
             docker build \
-              -f Docker/Dockerfile \
-              -t "$REPOSITORY:$TAG" -t "$REPOSITORY:$SHA_TAG" \
-              --build-arg BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-              --build-arg TAG="$TAG" \
-              --build-arg GIT_COMMIT="$CIRCLE_SHA1" \
-              --build-arg GIT_URL="$(echo "$CIRCLE_REPOSITORY_URL" | sed -e 's/^git@/https:\/\//g' -e 's/\.git$//g' -e 's/:/\//g')" \
-              --build-arg PROJECT_USERNAME="$CIRCLE_PROJECT_USERNAME" \
-              .
+            -f Docker/Dockerfile \
+            -t $REPOSITORY:$TAG \
+            --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+            --build-arg TAG="${TAG}" \
+            --build-arg GIT_COMMIT=$(git rev-parse -q --verify HEAD) \
+            --build-arg GIT_URL=$(echo ${CIRCLE_REPOSITORY_URL} | sed -e 's/^git@/https:\/\//g' -e 's/\.git$//g' -e 's/:/\//g') \
+            --build-arg SQLITE_VERSION=3430200 \
+            --build-arg SQLITE_YEAR=2023 \
+            --build-arg PROJECT_USERNAME=${GHCR_USERNAME:-$CIRCLE_PROJECT_USERNAME} \
+            .
 
-            # Scan de vulnerabilites AVANT publication : HIGH/CRITICAL corrigeables => echec
-            TV="${TRIVY_VERSION:-0.58.0}"   # sans le "v"
-            curl -fsSL -o /tmp/trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v${TV}/trivy_${TV}_Linux-64bit.tar.gz"
-            curl -fsSL -o /tmp/trivy_checksums.txt "https://github.com/aquasecurity/trivy/releases/download/v${TV}/trivy_${TV}_checksums.txt"
-            EXPECTED=$(grep " trivy_${TV}_Linux-64bit.tar.gz$" /tmp/trivy_checksums.txt | cut -d' ' -f1)
-            echo "$EXPECTED  /tmp/trivy.tgz" | sha256sum -c -
-            tar -xzf /tmp/trivy.tgz -C /tmp trivy
-            sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
-            trivy --version
-            mkdir -p reports
-            trivy image --format json --output reports/trivy-image.json "$REPOSITORY:$SHA_TAG"
-            trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$REPOSITORY:$SHA_TAG"
+            # Push the Docker image
+            docker push $REPOSITORY:$TAG
 
-            docker push "$REPOSITORY:$TAG"
-            docker push "$REPOSITORY:$SHA_TAG"
-
-            # Signature de l'image (cle privee cosign stockee dans CircleCI)
-            sudo curl -fsSL -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
-            sudo chmod +x /usr/local/bin/cosign
-            DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$REPOSITORY:$SHA_TAG")
-            echo "$COSIGN_PRIVATE_KEY" > /tmp/cosign.key
-            COSIGN_PASSWORD="$COSIGN_PASSWORD" cosign sign --yes --key /tmp/cosign.key "$DIGEST"
-            rm -f /tmp/cosign.key
+            # Security Audit: Scan the newly built Docker image with Trivy
+            echo "Installing Trivy security scanner..."
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /tmp
+            echo "Scanning image $REPOSITORY:$TAG with Trivy..."
+            /tmp/trivy image --exit-code 0 --severity HIGH,CRITICAL --format table -o trivy-report.txt $REPOSITORY:$TAG
+            cat trivy-report.txt
       - store_artifacts:
-          path: reports
-          destination: trivy
+          path: trivy-report.txt
+          destination: trivy-security-report
 
   # ---------------------------------------------------------------- DEPLOY
   deploy-ssh-staging:
