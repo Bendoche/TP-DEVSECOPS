@@ -18,19 +18,19 @@ attach_workspace: &attach_workspace
 executors:
   php-executor:
     resource_class: small
-    shell: /bin/bash
+    shell: /bin/bash -eo pipefail
     docker:
       - name: localhost
         image: cimg/php:8.2          
   builder-executor:
     resource_class: small
-    shell: /bin/bash
+    shell: /bin/bash -eo pipefail
     docker:
       - name: localhost
         image: cimg/base:stable
   simple-executor:
     resource_class: small
-    shell: /bin/bash
+    shell: /bin/bash -eo pipefail
     docker:
       - name: localhost
         image: cimg/base:stable
@@ -216,7 +216,7 @@ jobs:
               .
 
             # Scan de vulnerabilites AVANT publication : HIGH/CRITICAL corrigeables => echec
-            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "${TRIVY_VERSION:-v0.58.0}"
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin "${TRIVY_VERSION:-v0.58.0}"
             mkdir -p reports
             trivy image --format json --output reports/trivy-image.json "$REPOSITORY:$SHA_TAG"
             trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$REPOSITORY:$SHA_TAG"
@@ -225,8 +225,8 @@ jobs:
             docker push "$REPOSITORY:$SHA_TAG"
 
             # Signature de l'image (cle privee cosign stockee dans CircleCI)
-            curl -sSL -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
-            chmod +x /usr/local/bin/cosign
+            sudo curl -fsSL -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+            sudo chmod +x /usr/local/bin/cosign
             DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$REPOSITORY:$SHA_TAG")
             echo "$COSIGN_PRIVATE_KEY" > /tmp/cosign.key
             COSIGN_PASSWORD="$COSIGN_PASSWORD" cosign sign --yes --key /tmp/cosign.key "$DIGEST"
