@@ -1,0 +1,317 @@
+version: 2.1
+
+# ---------------------------------------------------------------------------
+# Pipeline CI/CD - TP03 DevSecOps (PHP / Composer / Docker / GHCR / Infisical / EC2)
+# Convention de nommage : build- lint- test- security- metrics- deploy-
+# ---------------------------------------------------------------------------
+
+persist_to_workspace: &persist_to_workspace
+  persist_to_workspace:
+    root: .
+    paths:
+      - .
+
+attach_workspace: &attach_workspace
+  attach_workspace:
+    at: ~/project
+
+executors:
+  php-executor:
+    resource_class: small
+    shell: /bin/bash
+    docker:
+      - name: localhost
+        image: cimg/php:8.2          
+  builder-executor:
+    resource_class: small
+    shell: /bin/bash
+    docker:
+      - name: localhost
+        image: cimg/base:stable
+  simple-executor:
+    resource_class: small
+    shell: /bin/bash
+    docker:
+      - name: localhost
+        image: cimg/base:stable
+
+jobs:
+  # ------------------------------------------------------------------ BUILD
+  build-setup:
+    executor: php-executor
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v2-dependencies-{{ checksum "composer.lock" }}
+            - v2-dependencies-
+      - run:
+          name: Install dependencies
+          command: composer install --no-interaction --no-ansi --prefer-dist
+      - save_cache:
+          paths:
+            - ./vendor
+          key: v2-dependencies-{{ checksum "composer.lock" }}
+      - *persist_to_workspace
+
+  # ------------------------------------------------------------------ LINT
+  lint-phpcs:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Install PHP_CodeSniffer + PHPCompatibility (global, composer.json intact)
+          command: |
+            composer global config --no-plugins allow-plugins.dealerdirect/phpcodesniffer-composer-installer true
+            composer global require --no-interaction "squizlabs/php_codesniffer=^3.10" "phpcompatibility/php-compatibility=*" "dealerdirect/phpcodesniffer-composer-installer"
+      - run:
+          name: Run PHPCS (ruleset phpcs.xml) - rapport + resume
+          command: |
+            export PATH="$(composer global config bin-dir --absolute 2>/dev/null):$PATH"
+            mkdir -p reports
+            # exit 1/2 = violations de style : non bloquant (rapport conserve). Code >= 3 = vraie erreur.
+            phpcs --standard=phpcs.xml --extensions=php --ignore=vendor/ --report=checkstyle --report-file=reports/phpcs-report.xml . || rc=$?
+            phpcs --standard=phpcs.xml --extensions=php --ignore=vendor/ --report=summary . || true
+            if [ "${rc:-0}" -ge 3 ]; then exit "$rc"; fi
+      - store_artifacts:
+          path: reports
+          destination: phpcs
+
+  lint-phpmd:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Install PHPMD
+          command: composer global require --no-interaction phpmd/phpmd
+      - run:
+          name: Run PHPMD (cleancode, codesize, design, naming, unusedcode)
+          command: |
+            export PATH="$(composer global config bin-dir --absolute 2>/dev/null):$PATH"
+            mkdir -p reports
+            phpmd src html cleancode,codesize,design,naming,unusedcode --reportfile reports/phpmd.html --ignore-violations-on-exit
+            phpmd src text cleancode,codesize,design,naming,unusedcode --ignore-violations-on-exit
+      - store_artifacts:
+          path: reports
+          destination: phpmd
+
+  lint-phpdoccheck:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Install php-doc-check
+          command: composer global require --no-interaction niels-de-blaauw/php-doc-check
+      - run:
+          name: Check PHPDoc coverage on src/
+          command: |
+            export PATH="$(composer global config bin-dir --absolute 2>/dev/null):$PATH"
+            mkdir -p reports
+            php-doc-check src 2>&1 | tee reports/phpdoccheck.txt || true   # consultatif
+      - store_artifacts:
+          path: reports
+          destination: phpdoccheck
+
+  lint-hadolint:
+    executor: simple-executor
+    steps:
+      - checkout
+      - run:
+          name: Lint Dockerfile with hadolint
+          command: |
+            curl -sSL -o hadolint https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+            chmod +x hadolint
+            mkdir -p reports
+            ./hadolint --no-fail -f json Docker/Dockerfile > reports/hadolint.json
+            ./hadolint --failure-threshold error Docker/Dockerfile   # bloque uniquement sur les "error"
+      - store_artifacts:
+          path: reports
+          destination: hadolint
+
+  # --------------------------------------------------------------- METRICS
+  metrics-phploc:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Run phploc
+          command: |
+            mkdir -p reports
+            curl -sSL -o phploc.phar https://phar.phpunit.de/phploc.phar
+            php phploc.phar --log-xml=reports/phploc.xml src public | tee reports/phploc.txt
+      - store_artifacts:
+          path: reports
+          destination: phploc
+
+  metrics-phpmetrics:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Install and run PhpMetrics (rapport HTML)
+          command: |
+            composer global require --no-interaction phpmetrics/phpmetrics
+            export PATH="$(composer global config bin-dir --absolute 2>/dev/null):$PATH"
+            phpmetrics --report-html=reports/phpmetrics --report-json=reports/phpmetrics.json src
+      - store_artifacts:
+          path: reports
+          destination: phpmetrics
+
+  # -------------------------------------------------------------- SECURITY
+  security-composer-audit:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: composer audit (advisories Packagist) - bloquant
+          command: |
+            mkdir -p reports
+            composer audit --locked --format=json > reports/composer-audit.json || rc=$?
+            composer audit --locked || true
+            exit "${rc:-0}"
+      - store_artifacts:
+          path: reports
+          destination: composer-audit
+
+  # ------------------------------------------------------------------ TEST
+  test-phpunit:
+    executor: php-executor
+    steps:
+      - *attach_workspace
+      - run:
+          name: Run PHPUnit (Unit + Feature)
+          command: |
+            mkdir -p reports
+            ./vendor/bin/phpunit --log-junit reports/junit.xml
+      - store_test_results:
+          path: reports
+
+  # ----------------------------------------------------------- BUILD IMAGE
+  build-docker-image:
+    executor: builder-executor
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Build, scan (Trivy), push (GHCR) and sign (cosign)
+          command: |
+            REPOSITORY=$(echo "ghcr.io/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
+            TAG=$(echo "$CIRCLE_BRANCH" | tr '[:upper:]' '[:lower:]' | tr '/' '-' | tr -cd '[:alnum:]._-' | cut -c 1-128)
+            SHA_TAG="sha-$(echo "$CIRCLE_SHA1" | cut -c1-12)"
+
+            echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+
+            docker build \
+              -f Docker/Dockerfile \
+              -t "$REPOSITORY:$TAG" -t "$REPOSITORY:$SHA_TAG" \
+              --build-arg BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+              --build-arg TAG="$TAG" \
+              --build-arg GIT_COMMIT="$CIRCLE_SHA1" \
+              --build-arg GIT_URL="$(echo "$CIRCLE_REPOSITORY_URL" | sed -e 's/^git@/https:\/\//g' -e 's/\.git$//g' -e 's/:/\//g')" \
+              --build-arg PROJECT_USERNAME="$CIRCLE_PROJECT_USERNAME" \
+              .
+
+            # Scan de vulnerabilites AVANT publication : HIGH/CRITICAL corrigeables => echec
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin "${TRIVY_VERSION:-v0.58.0}"
+            mkdir -p reports
+            trivy image --format json --output reports/trivy-image.json "$REPOSITORY:$SHA_TAG"
+            trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$REPOSITORY:$SHA_TAG"
+
+            docker push "$REPOSITORY:$TAG"
+            docker push "$REPOSITORY:$SHA_TAG"
+
+            # Signature de l'image (cle privee cosign stockee dans CircleCI)
+            curl -sSL -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+            chmod +x /usr/local/bin/cosign
+            DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$REPOSITORY:$SHA_TAG")
+            echo "$COSIGN_PRIVATE_KEY" > /tmp/cosign.key
+            COSIGN_PASSWORD="$COSIGN_PASSWORD" cosign sign --yes --key /tmp/cosign.key "$DIGEST"
+            rm -f /tmp/cosign.key
+      - store_artifacts:
+          path: reports
+          destination: trivy
+
+  # ---------------------------------------------------------------- DEPLOY
+  deploy-ssh-staging:
+    executor: simple-executor
+    steps:
+      - checkout
+      - add_ssh_keys:
+          fingerprints:
+            - "SHA256:REMPLACER_PAR_EMPREINTE_CLE_STAGING"
+      - run:
+          name: Trust staging host key (pinned, no TOFU)
+          command: |
+            mkdir -p ~/.ssh && chmod 700 ~/.ssh
+            echo "$STAGING_SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+      - run:
+          name: Deploy image to staging EC2
+          command: |
+            REPOSITORY=$(echo "ghcr.io/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
+            IMAGE="$REPOSITORY:sha-$(echo "$CIRCLE_SHA1" | cut -c1-12)"
+            ssh -o StrictHostKeyChecking=yes "$STAGING_SSH_USER@$STAGING_SSH_HOST" \
+              "bash -s -- '$IMAGE' php-devops-tp-staging '${STAGING_APP_PORT:-8080}' staging" < scripts/deploy.sh
+
+  deploy-ssh-production:
+    executor: simple-executor
+    steps:
+      - checkout
+      - add_ssh_keys:
+          fingerprints:
+            - "SHA256:REMPLACER_PAR_EMPREINTE_CLE_PROD"
+      - run:
+          name: Trust production host key (pinned, no TOFU)
+          command: |
+            mkdir -p ~/.ssh && chmod 700 ~/.ssh
+            echo "$PROD_SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+      - run:
+          name: Deploy image to production EC2 (with health check + rollback)
+          command: |
+            REPOSITORY=$(echo "ghcr.io/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME" | tr '[:upper:]' '[:lower:]' | tr -d '_')
+            IMAGE="$REPOSITORY:sha-$(echo "$CIRCLE_SHA1" | cut -c1-12)"
+            ssh -o StrictHostKeyChecking=yes "$PROD_SSH_USER@$PROD_SSH_HOST" \
+              "bash -s -- '$IMAGE' php-devops-tp-prod '${PROD_APP_PORT:-80}' prod" < scripts/deploy.sh
+
+workflows:
+  ci_cd:
+    jobs:
+      - build-setup
+      - lint-hadolint
+      - lint-phpcs:
+          requires: [build-setup]
+      - lint-phpmd:
+          requires: [build-setup]
+      - lint-phpdoccheck:
+          requires: [build-setup]
+      - metrics-phploc:
+          requires: [build-setup]
+      - metrics-phpmetrics:
+          requires: [build-setup]
+      - security-composer-audit:
+          requires: [build-setup]
+      - test-phpunit:
+          requires: [build-setup]
+      - build-docker-image:
+          requires: [test-phpunit, security-composer-audit, lint-hadolint]
+          filters:
+            branches:
+              only: [master, main, develop, /^feature\/.*/, /^release\/.*/, /^hotfix\/.*/, /^bugfix\/.*/]
+      - hold:
+          type: approval
+          requires: [build-docker-image]
+          filters:
+            branches:
+              only: [main, master, /^release\/.*/]
+      - deploy-ssh-staging:
+          context: staging
+          requires: [hold]
+          filters:
+            branches:
+              only: [/^release\/.*/]
+      - deploy-ssh-production:
+          context: production
+          requires: [hold]
+          filters:
+            branches:
+              only: [main, master]
