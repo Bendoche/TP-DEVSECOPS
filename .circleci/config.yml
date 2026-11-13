@@ -61,17 +61,20 @@ jobs:
       - *attach_workspace
       - run:
           name: Install PHP_CodeSniffer + PHPCompatibility (global, composer.json intact)
-          command: |
-            composer global config --no-plugins allow-plugins.dealerdirect/phpcodesniffer-composer-installer true
-            composer global require --no-interaction "squizlabs/php_codesniffer=^3.10" "phpcompatibility/php-compatibility=*" "dealerdirect/phpcodesniffer-composer-installer"
+          command: composer global require --no-interaction "squizlabs/php_codesniffer=^3.10" "phpcompatibility/php-compatibility=^9.3"
       - run:
           name: Run PHPCS (ruleset phpcs.xml) - rapport + resume
           command: |
             export PATH="$(composer global config bin-dir --absolute 2>/dev/null):$PATH"
+            PHPCOMPAT="$(composer global config vendor-dir --absolute 2>/dev/null)/phpcompatibility/php-compatibility"
+            test -d "$PHPCOMPAT" || { echo "PHPCompatibility introuvable : $PHPCOMPAT"; exit 3; }
+            # --runtime-set l'emporte sur tout installed_paths relatif defini dans phpcs.xml
+            OPTS=(--runtime-set installed_paths "$PHPCOMPAT" --standard=phpcs.xml --extensions=php --ignore=vendor/)
+            phpcs -i
             mkdir -p reports
             # exit 1/2 = violations de style : non bloquant (rapport conserve). Code >= 3 = vraie erreur.
-            phpcs --standard=phpcs.xml --extensions=php --ignore=vendor/ --report=checkstyle --report-file=reports/phpcs-report.xml . || rc=$?
-            phpcs --standard=phpcs.xml --extensions=php --ignore=vendor/ --report=summary . || true
+            phpcs "${OPTS[@]}" --report=checkstyle --report-file=reports/phpcs-report.xml . || rc=$?
+            phpcs "${OPTS[@]}" --report=summary . || true
             if [ "${rc:-0}" -ge 3 ]; then exit "$rc"; fi
       - store_artifacts:
           path: reports
